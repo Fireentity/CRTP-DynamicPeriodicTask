@@ -25,7 +25,7 @@ int event_parse(const char *line, const int client_fd, Event *out_event) {
     if (strcasecmp(cmd, "DEACTIVATE") == 0 || strcasecmp(cmd, "D") == 0) {
         if (tokens < 2) return -1;
         char *end;
-        long val = strtol(arg, &end, 10);
+        const long val = strtol(arg, &end, 10);
         if (*end != '\0') return -1;
         out_event->type = EV_DEACTIVATE;
         out_event->payload.target_id = val;

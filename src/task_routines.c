@@ -19,8 +19,8 @@ static TaskType task_catalog[N_TASKS] = {
 };
 
 // Use volatile to prevent compiler from optimizing away the loop
-static inline void workload(double i) {
-    volatile double r = sqrt(i) * 0.001 + sin(i / 1000.0);
+static inline void workload(const double i) {
+    const volatile double r = sqrt(i) * 0.001 + sin(i / 1000.0);
     (void) r;
 }
 
@@ -40,8 +40,8 @@ static void calibrate(void) {
     printf("[Routines] Calibration done: %llu loops/ms\n", loops_per_ms);
 }
 
-static void burn(long ms) {
-    unsigned long long max = loops_per_ms * ms;
+static void burn(const long ms) {
+    const unsigned long long max = loops_per_ms * ms;
     for (unsigned long long i = 0; i < max; i++) workload((double) i);
 }
 

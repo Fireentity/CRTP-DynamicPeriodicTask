@@ -4,65 +4,35 @@
 #include <math.h>
 #include <string.h>
 #include "supervisor.h"
+
+#include "event_queue.h"
 #include "task_routines.h"
 #include "task_runtime.h"
 #include "net_core.h"
 
 typedef struct {
-    Event buffer[MAX_QUEUE_SIZE];
-    int head;
-    int tail;
-    int count;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-} EventQueue;
-
-static EventQueue queue;
-
-static struct {
     const TaskType *type;
     int instance_id;
-} active_set[MAX_INSTANCES];
+} Task;
 
-static int active_count = 0;
-static pthread_mutex_t active_mutex = PTHREAD_MUTEX_INITIALIZER;
+struct Supervisor {
+    atomic_bool running;
+    EventQueue queue;
+    Task active_set[MAX_INSTANCES];
+    int active_count;
+    pthread_mutex_t active_mutex;
+};
 
-void supervisor_init(void) {
-    queue.head = 0;
-    queue.tail = 0;
-    queue.count = 0;
-    pthread_mutex_init(&queue.mutex, NULL);
-    pthread_cond_init(&queue.cond, NULL);
+Supervisor supervisor_init(void) {
     printf("[Supervisor] Subsystem Initialized.\n");
+    const Supervisor supervisor = {
+        .running = ATOMIC_VAR_INIT(true),
+        .queue = event_queue_init(),
+        .active_count = 0,
+        .active_mutex = PTHREAD_MUTEX_INITIALIZER,
+    };
+    return supervisor;
 }
-
-int supervisor_push_event(Event ev) {
-    int ret = -1;
-    pthread_mutex_lock(&queue.mutex);
-    if (queue.count < MAX_QUEUE_SIZE) {
-        queue.buffer[queue.tail] = ev;
-        queue.tail = (queue.tail + 1) % MAX_QUEUE_SIZE;
-        queue.count++;
-        pthread_cond_signal(&queue.cond);
-        ret = 0;
-    }
-    pthread_mutex_unlock(&queue.mutex);
-    return ret;
-}
-
-static Event queue_pop(void) {
-    pthread_mutex_lock(&queue.mutex);
-    while (queue.count == 0) {
-        pthread_cond_wait(&queue.cond, &queue.mutex);
-    }
-    Event ev = queue.buffer[queue.head];
-    queue.head = (queue.head + 1) % MAX_QUEUE_SIZE;
-    queue.count--;
-    pthread_mutex_unlock(&queue.mutex);
-    return ev;
-}
-
-// --- Response Time Analysis ---
 
 static int compare_period(const void *a, const void *b) {
     const TaskType *ta = *(const TaskType **) a;
@@ -70,13 +40,13 @@ static int compare_period(const void *a, const void *b) {
     return (int) (ta->period_ms - tb->period_ms);
 }
 
-static int check_rta(const TaskType *candidate) {
+static int check_rta(Supervisor *supervisor, const TaskType *candidate) {
     const TaskType *tasks[MAX_INSTANCES + 1];
     int count = 0;
 
-    pthread_mutex_lock(&active_mutex);
-    for (int i = 0; i < active_count; i++) tasks[count++] = active_set[i].type;
-    pthread_mutex_unlock(&active_mutex);
+    pthread_mutex_lock(&supervisor->active_mutex);
+    for (int i = 0; i < supervisor->active_count; i++) tasks[count++] = supervisor->active_set[i].type;
+    pthread_mutex_unlock(&supervisor->active_mutex);
     tasks[count++] = candidate;
 
     // Utilization Test (Necessary Condition)
@@ -119,40 +89,43 @@ static int check_rta(const TaskType *candidate) {
     return 1;
 }
 
-static void handle_activate(Event ev) {
+static void handle_activate(Supervisor *spv, const Event ev) {
     char resp[64];
     const TaskType *task = routines_get_by_name(ev.payload.task_name);
+    Task *active_set = spv->active_set;
+    pthread_mutex_t *active_mutex = &spv->active_mutex;
+    const int active_count = spv->active_count;
 
     if (!task) {
         net_send_response(ev.client_fd, "ERR Unknown Task\n");
         return;
     }
 
-    if (!check_rta(task)) {
+    if (!check_rta(spv, task)) {
         net_send_response(ev.client_fd, "ERR Schedulability\n");
         return;
     }
 
     // Pre-check capacity to avoid unnecessary thread spawning
-    pthread_mutex_lock(&active_mutex);
+    pthread_mutex_lock(active_mutex);
     if (active_count >= MAX_INSTANCES) {
-        pthread_mutex_unlock(&active_mutex);
+        pthread_mutex_unlock(active_mutex);
         net_send_response(ev.client_fd, "ERR System Full\n");
         return;
     }
-    pthread_mutex_unlock(&active_mutex);
+    pthread_mutex_unlock(active_mutex);
 
-    int id = runtime_create_instance(task);
+    const int id = runtime_create_instance(task);
     if (id < 0) {
         net_send_response(ev.client_fd, "ERR System Full\n");
         return;
     }
 
-    pthread_mutex_lock(&active_mutex);
+    pthread_mutex_lock(active_mutex);
     if (active_count < MAX_INSTANCES) {
         active_set[active_count].type = task;
         active_set[active_count].instance_id = id;
-        active_count++;
+        spv->active_count++;
         snprintf(resp, sizeof(resp), "OK ID=%d\n", id);
         printf("[Supervisor] Activated task '%s' as ID %d (Total: %d)\n", task->name, id, active_count);
     } else {
@@ -160,39 +133,49 @@ static void handle_activate(Event ev) {
         runtime_stop_instance(id);
         snprintf(resp, sizeof(resp), "ERR System Full\n");
     }
-    pthread_mutex_unlock(&active_mutex);
+    pthread_mutex_unlock(active_mutex);
 
     net_send_response(ev.client_fd, resp);
 }
 
-static void handle_deactivate(Event ev) {
-    int id = (int) ev.payload.target_id;
-    if (runtime_stop_instance(id) == 0) {
-        pthread_mutex_lock(&active_mutex);
-        int idx = -1;
-        for (int i = 0; i < active_count; i++) {
-            if (active_set[i].instance_id == id) {
-                idx = i;
-                break;
-            }
-        }
-        if (idx != -1) {
-            for (int i = idx; i < active_count - 1; i++) active_set[i] = active_set[i + 1];
-            active_count--;
-        }
-        pthread_mutex_unlock(&active_mutex);
+static void handle_deactivate(Supervisor *spv, const Event ev) {
+    Task *active_set = spv->active_set;
+    pthread_mutex_t *active_mutex = &spv->active_mutex;
+    const int active_count = spv->active_count;
 
-        net_send_response(ev.client_fd, "OK\n");
-        printf("[Supervisor] Deactivated task ID %d\n", id);
-    } else {
+    const int id = (int) ev.payload.target_id;
+
+    if (runtime_stop_instance(id) != 0) {
         net_send_response(ev.client_fd, "ERR Invalid ID\n");
+        return;
     }
+
+    pthread_mutex_lock(active_mutex);
+    int idx = -1;
+    for (int i = 0; i < active_count; i++) {
+        if (active_set[i].instance_id == id) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx != -1) {
+        for (int i = idx; i < active_count - 1; i++) active_set[i] = active_set[i + 1];
+        spv->active_count--;
+    }
+    pthread_mutex_unlock(active_mutex);
+
+    net_send_response(ev.client_fd, "OK\n");
+    printf("[Supervisor] Deactivated task ID %d\n", id);
 }
 
-static void handle_list(Event ev) {
+static void handle_list(Supervisor *spv, const Event ev) {
+    const Task *active_set = spv->active_set;
+    pthread_mutex_t *active_mutex = &spv->active_mutex;
+    const int active_count = spv->active_count;
+
     char resp[NET_RESPONSE_BUF_SIZE];
     int off = 0;
-    pthread_mutex_lock(&active_mutex);
+    pthread_mutex_lock(active_mutex);
     off += snprintf(resp + off, sizeof(resp) - off, "Running: %d\n", active_count);
     for (int i = 0; i < active_count; i++) {
         if (sizeof(resp) - off < 100) break;
@@ -200,15 +183,15 @@ static void handle_list(Event ev) {
                         active_set[i].instance_id, active_set[i].type->name,
                         active_set[i].type->wcet_ms, active_set[i].type->period_ms);
     }
-    pthread_mutex_unlock(&active_mutex);
+    pthread_mutex_unlock(active_mutex);
     net_send_response(ev.client_fd, resp);
 }
 
-static void handle_info(Event ev) {
+static void handle_info(const Supervisor *spv, const Event ev) {
     char resp[NET_RESPONSE_BUF_SIZE];
     int count, off = 0;
     const TaskType *cat = routines_get_all(&count);
-    off += snprintf(resp + off, sizeof(resp) - off, "Capacity: %d/%d active\nTasks:\n", active_count, MAX_INSTANCES);
+    off += snprintf(resp + off, sizeof(resp) - off, "Capacity: %d/%d active\nTasks:\n", spv->active_count, MAX_INSTANCES);
     for (int i = 0; i < count; i++) {
         off += snprintf(resp + off, sizeof(resp) - off, "  %s: C=%ld T=%ld D=%ld\n",
                         cat[i].name, cat[i].wcet_ms, cat[i].period_ms, cat[i].deadline_ms);
@@ -216,18 +199,18 @@ static void handle_info(Event ev) {
     net_send_response(ev.client_fd, resp);
 }
 
-void supervisor_loop(void) {
+void supervisor_loop(Supervisor *supervisor) {
     printf("[Supervisor] Event Loop Started.\n");
     while (1) {
-        Event ev = queue_pop();
+        const Event ev = event_queue_pop(&supervisor->queue);
         switch (ev.type) {
-            case EV_ACTIVATE: handle_activate(ev);
+            case EV_ACTIVATE: handle_activate(supervisor, ev);
                 break;
-            case EV_DEACTIVATE: handle_deactivate(ev);
+            case EV_DEACTIVATE: handle_deactivate(supervisor, ev);
                 break;
-            case EV_LIST: handle_list(ev);
+            case EV_LIST: handle_list(supervisor, ev);
                 break;
-            case EV_INFO: handle_info(ev);
+            case EV_INFO: handle_info(supervisor, ev);
                 break;
             case EV_SHUTDOWN:
                 printf("[Supervisor] Shutdown signal received.\n");

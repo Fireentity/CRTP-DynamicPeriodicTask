@@ -6,12 +6,12 @@
 #include "constants.h"
 
 typedef struct {
-    char name[TASK_NAME_LEN];
-    long wcet_ms;
-    long period_ms;
-    long deadline_ms;
+    const char name[TASK_NAME_LEN];
+    const long wcet_ms;
+    const long period_ms;
+    const long deadline_ms;
 
-    void (*routine_fn)(void);
+    void (* const routine_fn)(void);
 } TaskType;
 
 typedef struct {
