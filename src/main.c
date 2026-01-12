@@ -5,14 +5,18 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
-#include <errno.h>
 #include <signal.h>
 #include "supervisor.h"
-#include "net_core.h"
-#include "constants.h"
+#include "tcp_server.h"
+#include "../include/constants.h"
 #include "task_runtime.h"
-#include "task_routines.h"
+#include "task_config.h"
 
+// Context to pass multiple arguments to the network thread
+typedef struct {
+    Supervisor *sv;
+    TcpServer *server;
+} NetworkContext;
 
 // Empty handler to interrupt blocking syscalls (e.g., nanosleep)
 static void sigusr1_handler(const int signum) { (void) signum; }
@@ -26,13 +30,17 @@ static void setup_signals(void) {
 }
 
 static void *network_entry(void *arg) {
-    while (atomic_load(&keep_running)) net_poll();
+    const NetworkContext *ctx = arg;
+    while (atomic_load(&ctx->sv->running)) {
+        tcp_server_poll(ctx->sv, ctx->server);
+    }
     return NULL;
 }
 
 static void *supervisor_entry(void *arg) {
-    supervisor_loop();
-    atomic_store(&keep_running, false);
+    Supervisor *sv = arg;
+    supervisor_loop(sv);
+    atomic_store(&sv->running, false);
     return NULL;
 }
 
@@ -59,16 +67,18 @@ int main(void) {
         perror("[Main] Failed to set CPU affinity");
     }
 
-    /* Initialize ALL internal subsystems before creating threads or opening sockets.
-       This prevents race conditions where the network thread accepts a client
-       before the supervisor or task lists are ready. */
-
-    supervisor_init();
-    routines_init(); // Blocking CPU calibration
+    /* Initialize ALL internal subsystems before creating threads or opening sockets. */
+    Supervisor supervisor;
+    supervisor_init(&supervisor);
+    tasks_config_init(&tasks_config); // Blocking CPU calibration
     runtime_init();
 
     // Open network port only after internals are ready
-    if (net_init(SERVER_PORT) < 0) return EXIT_FAILURE;
+    TcpServer server;
+    const int net_err = tcp_server_init(&server, SERVER_PORT);
+    if (net_err != 0) {
+        return EXIT_FAILURE;
+    }
 
     pthread_t net_thread, sv_thread;
     pthread_attr_t net_attr, sv_attr;
@@ -77,14 +87,16 @@ int main(void) {
     set_fifo_priority(&net_attr, 99);
     set_fifo_priority(&sv_attr, 98);
 
-    if (pthread_create(&sv_thread, &sv_attr, supervisor_entry, NULL) != 0) {
+    if (pthread_create(&sv_thread, &sv_attr, supervisor_entry, &supervisor) != 0) {
         fprintf(stderr, "[Main] CRITICAL: Failed to create Supervisor thread\n");
         return EXIT_FAILURE;
     }
 
-    if (pthread_create(&net_thread, &net_attr, network_entry, NULL) != 0) {
+    NetworkContext net_ctx = { .sv = &supervisor, .server = &server };
+
+    if (pthread_create(&net_thread, &net_attr, network_entry, &net_ctx) != 0) {
         fprintf(stderr, "[Main] CRITICAL: Failed to create Network thread\n");
-        atomic_store(&keep_running, false);
+        atomic_store(&supervisor.running, false);
         pthread_join(sv_thread, NULL);
         return EXIT_FAILURE;
     }
@@ -92,7 +104,7 @@ int main(void) {
     pthread_join(sv_thread, NULL);
     pthread_join(net_thread, NULL);
 
-    net_cleanup();
+    tcp_server_cleanup(&server);
     runtime_cleanup();
 
     return EXIT_SUCCESS;

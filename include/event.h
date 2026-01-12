@@ -1,7 +1,7 @@
 #ifndef EVENT_H
 #define EVENT_H
 
-#include "utils/constants.h"
+#include "constants.h"
 
 typedef enum {
     EV_UNKNOWN = 0,

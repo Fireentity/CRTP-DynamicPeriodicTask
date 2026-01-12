@@ -28,13 +28,10 @@ Event event_queue_pop(EventQueue* queue) {
     return ev;
 }
 
-EventQueue event_queue_init() {
-    const EventQueue queue = {
-        .head = 0,
-        .tail = 0,
-        .count = 0,
-        .mutex = PTHREAD_MUTEX_INITIALIZER,
-        .cond = PTHREAD_COND_INITIALIZER
-    };
-    return queue;
+void event_queue_init(EventQueue *queue) {
+    queue->head = 0;
+    queue->tail = 0;
+    queue->count = 0;
+    pthread_mutex_init(&queue->mutex, NULL);
+    pthread_cond_init(&queue->cond, NULL);
 }

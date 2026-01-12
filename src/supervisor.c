@@ -6,32 +6,17 @@
 #include "supervisor.h"
 
 #include "event_queue.h"
-#include "task_routines.h"
+#include "task_config.h"
 #include "task_runtime.h"
-#include "net_core.h"
+#include "tcp_server.h"
 
-typedef struct {
-    const TaskType *type;
-    int instance_id;
-} Task;
-
-struct Supervisor {
-    atomic_bool running;
-    EventQueue queue;
-    Task active_set[MAX_INSTANCES];
-    int active_count;
-    pthread_mutex_t active_mutex;
-};
-
-Supervisor supervisor_init(void) {
+void supervisor_init(Supervisor *supervisor) {
     printf("[Supervisor] Subsystem Initialized.\n");
-    const Supervisor supervisor = {
-        .running = ATOMIC_VAR_INIT(true),
-        .queue = event_queue_init(),
-        .active_count = 0,
-        .active_mutex = PTHREAD_MUTEX_INITIALIZER,
-    };
-    return supervisor;
+
+    supervisor->running = ATOMIC_VAR_INIT(true);
+    event_queue_init(&supervisor->queue);
+    supervisor->active_count = 0;
+    pthread_mutex_init(&supervisor->active_mutex, NULL);
 }
 
 static int compare_period(const void *a, const void *b) {
@@ -64,7 +49,6 @@ static int check_rta(Supervisor *supervisor, const TaskType *candidate) {
 
     for (int i = 0; i < count; i++) {
         double R = (double) tasks[i]->wcet_ms;
-        double R_new = R;
         int converged = 0;
 
         for (int k = 0; k < 100; k++) {
@@ -72,7 +56,7 @@ static int check_rta(Supervisor *supervisor, const TaskType *candidate) {
             for (int j = 0; j < i; j++) {
                 I += ceil(R / (double) tasks[j]->period_ms) * (double) tasks[j]->wcet_ms;
             }
-            R_new = (double) tasks[i]->wcet_ms + I;
+            const double R_new = (double) tasks[i]->wcet_ms + I;
 
             if (R_new > (double) tasks[i]->deadline_ms) {
                 printf("[RTA] Rejected %s: R=%.1f > D=%ld\n", candidate->name, R_new, tasks[i]->deadline_ms);
@@ -91,18 +75,18 @@ static int check_rta(Supervisor *supervisor, const TaskType *candidate) {
 
 static void handle_activate(Supervisor *spv, const Event ev) {
     char resp[64];
-    const TaskType *task = routines_get_by_name(ev.payload.task_name);
+    const TaskType *task = tasks_config_get_by_name(&tasks_config, ev.payload.task_name);
     Task *active_set = spv->active_set;
     pthread_mutex_t *active_mutex = &spv->active_mutex;
     const int active_count = spv->active_count;
 
     if (!task) {
-        net_send_response(ev.client_fd, "ERR Unknown Task\n");
+        tcp_server_send_response(ev.client_fd, "ERR Unknown Task\n");
         return;
     }
 
     if (!check_rta(spv, task)) {
-        net_send_response(ev.client_fd, "ERR Schedulability\n");
+        tcp_server_send_response(ev.client_fd, "ERR Schedulability\n");
         return;
     }
 
@@ -110,14 +94,14 @@ static void handle_activate(Supervisor *spv, const Event ev) {
     pthread_mutex_lock(active_mutex);
     if (active_count >= MAX_INSTANCES) {
         pthread_mutex_unlock(active_mutex);
-        net_send_response(ev.client_fd, "ERR System Full\n");
+        tcp_server_send_response(ev.client_fd, "ERR System Full\n");
         return;
     }
     pthread_mutex_unlock(active_mutex);
 
     const int id = runtime_create_instance(task);
     if (id < 0) {
-        net_send_response(ev.client_fd, "ERR System Full\n");
+        tcp_server_send_response(ev.client_fd, "ERR System Full\n");
         return;
     }
 
@@ -135,7 +119,7 @@ static void handle_activate(Supervisor *spv, const Event ev) {
     }
     pthread_mutex_unlock(active_mutex);
 
-    net_send_response(ev.client_fd, resp);
+    tcp_server_send_response(ev.client_fd, resp);
 }
 
 static void handle_deactivate(Supervisor *spv, const Event ev) {
@@ -146,7 +130,7 @@ static void handle_deactivate(Supervisor *spv, const Event ev) {
     const int id = (int) ev.payload.target_id;
 
     if (runtime_stop_instance(id) != 0) {
-        net_send_response(ev.client_fd, "ERR Invalid ID\n");
+        tcp_server_send_response(ev.client_fd, "ERR Invalid ID\n");
         return;
     }
 
@@ -164,7 +148,7 @@ static void handle_deactivate(Supervisor *spv, const Event ev) {
     }
     pthread_mutex_unlock(active_mutex);
 
-    net_send_response(ev.client_fd, "OK\n");
+    tcp_server_send_response(ev.client_fd, "OK\n");
     printf("[Supervisor] Deactivated task ID %d\n", id);
 }
 
@@ -184,19 +168,22 @@ static void handle_list(Supervisor *spv, const Event ev) {
                         active_set[i].type->wcet_ms, active_set[i].type->period_ms);
     }
     pthread_mutex_unlock(active_mutex);
-    net_send_response(ev.client_fd, resp);
+    tcp_server_send_response(ev.client_fd, resp);
 }
 
 static void handle_info(const Supervisor *spv, const Event ev) {
     char resp[NET_RESPONSE_BUF_SIZE];
-    int count, off = 0;
-    const TaskType *cat = routines_get_all(&count);
-    off += snprintf(resp + off, sizeof(resp) - off, "Capacity: %d/%d active\nTasks:\n", spv->active_count, MAX_INSTANCES);
-    for (int i = 0; i < count; i++) {
+    int off = 0;
+    const TaskType *cat = tasks_config.tasks;
+    off += snprintf(resp + off, sizeof(resp) - off,
+                    "Capacity: %d/%d active\nTasks:\n",
+                    spv->active_count,
+                    MAX_INSTANCES);
+    for (int i = 0; i < N_TASKS; i++) {
         off += snprintf(resp + off, sizeof(resp) - off, "  %s: C=%ld T=%ld D=%ld\n",
                         cat[i].name, cat[i].wcet_ms, cat[i].period_ms, cat[i].deadline_ms);
     }
-    net_send_response(ev.client_fd, resp);
+    tcp_server_send_response(ev.client_fd, resp);
 }
 
 void supervisor_loop(Supervisor *supervisor) {

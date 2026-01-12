@@ -10,13 +10,13 @@ find_package(Threads REQUIRED)
 
 set(DYNAMIC_PERIODIC_TASK
         src/main.c
-        src/net_core.c
+        src/tcp_server.c
         src/supervisor.c
-        src/task_routines.c
+        src/task_config.c
         src/task_runtime.c
         src/event.c
-        include/event_queue.h
         src/event_queue.c
+        src/task.c
 )
 
 add_executable(dynamic_periodic_task ${DYNAMIC_PERIODIC_TASK})

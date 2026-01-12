@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include <errno.h>
 #include <signal.h>
+#include "constants.h"
 #include "task_runtime.h"
 
 static TaskInstance pool[MAX_INSTANCES];

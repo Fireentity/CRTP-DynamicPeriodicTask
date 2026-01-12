@@ -15,6 +15,6 @@ int event_queue_push(EventQueue* queue, Event ev);
 
 Event event_queue_pop(EventQueue* queue);
 
-EventQueue event_queue_init();
+void event_queue_init(EventQueue *queue);
 
 #endif //EVENT_QUEUE_H

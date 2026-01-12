@@ -86,7 +86,7 @@ def test_rapid_churn_cycle():
             log(f"Churn Cycle {i+1}/{cycles}...")
 
             # Activate
-            sock.sendall(b"a t1\n")
+            sock.sendall(b"ACTIVATE t1\n")
             resp = sock.recv(1024).decode()
             if "ID=" not in resp:
                 log(f"Fail: No ID in response: {resp}")
@@ -95,7 +95,7 @@ def test_rapid_churn_cycle():
             tid = resp.strip().split("ID=")[1]
 
             # Deactivate
-            sock.sendall(f"d {tid}\n".encode())
+            sock.sendall(f"DEACTIVATE {tid}\n".encode())
             resp2 = sock.recv(1024).decode()
             if "OK" not in resp2:
                 log(f"Fail: Deactivate failed: {resp2}")
