@@ -1,57 +1,46 @@
-# Real-Time Dynamic Periodic Task Supervisor
 
-**Course:** Concurrent and Real-Time Programming (CRTP)  
-**University of Padova** **Professors:** Andrea Rigoni Garola, Gabriele Manduchi
+## Concurrent and Real-Time Programming
 
----
+This project implements a soft/hard real-time supervisor designed to dynamically accept task requests via a TCP interface. Upon receiving a request, the system verifies schedulability using Response Time Analysis (RTA) before executing accepted tasks with strict timing guarantees using `SCHED_FIFO`.
 
-## 🚀 Project Overview
+The architecture prioritizes precision and safety. It ensures zero-accumulated drift by utilizing `clock_nanosleep` with `TIMER_ABSTIME`. The network core handles I/O multiplexing through a single-threaded `poll()` implementation, robustly managing TCP fragmentation and buffer overflows. Internally, the supervisor relies on a thread-safe queue and atomic operations to manage concurrency and graceful shutdowns effectively.
 
-This project implements a soft/hard real-time supervisor capable of dynamically accepting task requests over TCP, verifying system schedulability using **Response Time Analysis (RTA)**, and executing accepted tasks with strict timing guarantees using `SCHED_FIFO`.
-
-### Features
-* **Zero-Accumulated Drift:** Uses `clock_nanosleep` with `TIMER_ABSTIME`.
-* **I/O Multiplexing:** Single-threaded network core using `poll()`.
-* **Concurrency:** Thread-safe supervisor queue and atomic shutdowns.
-* **Memory Safety:** Robust handling of TCP fragmentation and buffer overflows.
-
----
-
-## 🛠 Build & Run
+## Building and Running
 
 ### Prerequisites
-* Linux (Required for `SCHED_FIFO` and `pthread_setaffinity_np`)
-* CMake >= 3.16
-* GCC/Clang
-* Python 3 (for testing)
 
-### Compilation
+To build and run this project, you need a Linux environment (required for `SCHED_FIFO` and processor affinity), CMake (version 3.16+), a GCC/Clang compiler, and Python 3 for the test suite.
+
+### Compilation and Execution
+
+You can compile the project using the provided shell script. Note that **root privileges are required** to run the executable, as it must set real-time thread priorities.
+
 ```bash
+# Compile
 bash build.sh
-```
 
-### Running
-**Note:** Root privileges are required to set Real-Time priorities (`SCHED_FIFO`).
-
-```bash
+# Run
 sudo ./build/dynamic_periodic_task
+
 ```
 
-### Running Tests
-The test suite handles startup timing automatically, even under Valgrind.
+### Automated Testing
+
+The included test suite handles startup timing automatically and is compatible with Valgrind for memory analysis.
 
 ```bash
 sudo bash build.sh --test
+
 ```
 
----
+## Communication Protocol
 
-## 📡 Protocol
+The supervisor listens for ASCII commands on **port 8080** via Telnet or Netcat. The supported commands are detailed below:
 
-Connect via Telnet/Netcat on port `8080`:
-
-* `ACTIVATE <task_name>`: Starts a task (e.g., `A t1`). Returns `ID=<id>`.
-* `DEACTIVATE <id>`: Stops a specific instance (e.g., `D 1`).
-* `LIST`: Shows active instances.
-* `INFO`: Shows task catalog and system capacity.
-* `SHUTDOWN`: Gracefully terminates the server.
+| Command | Arguments | Description |
+| --- | --- | --- |
+| `ACTIVATE` | `<task_name>` | Requests the execution of a task. Returns `ID=<id>` on success. |
+| `DEACTIVATE` | `<id>` | Stops a specific running instance. |
+| `LIST` | N/A | Displays all currently active task instances. |
+| `INFO` | N/A | Returns the task catalog and current system capacity. |
+| `SHUTDOWN` | N/A | Gracefully terminates the server and all worker threads. |
