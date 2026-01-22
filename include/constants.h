@@ -18,13 +18,15 @@
 #include "task.h"
 
 static void task_A(void);
+
 static void task_B(void);
+
 static void task_C(void);
 
 static TasksConfig tasks_config = {
     .tasks = {
-        {"t1", 50, 300, 300, task_A},
-        {"t2", 100, 500, 500, task_B},
+        {"t1", 50, 300, 150, task_A},
+        {"t2", 100, 500, 200, task_B},
         {"t3", 200, 1000, 1000, task_C}
     }
 };

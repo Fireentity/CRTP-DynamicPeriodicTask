@@ -19,10 +19,10 @@ void supervisor_init(Supervisor *supervisor) {
     pthread_mutex_init(&supervisor->active_mutex, NULL);
 }
 
-static int compare_period(const void *a, const void *b) {
+static int compare_deadline(const void *a, const void *b) {
     const TaskType *ta = *(const TaskType **) a;
     const TaskType *tb = *(const TaskType **) b;
-    return (int) (ta->period_ms - tb->period_ms);
+    return (int) (ta->deadline_ms - tb->deadline_ms);
 }
 
 static int check_rta(Supervisor *supervisor, const TaskType *candidate) {
@@ -45,7 +45,7 @@ static int check_rta(Supervisor *supervisor, const TaskType *candidate) {
     }
 
     // Response Time Analysis (Sufficient Condition)
-    qsort(tasks, count, sizeof(const TaskType *), compare_period);
+    qsort(tasks, count, sizeof(const TaskType *), compare_deadline);
 
     for (int i = 0; i < count; i++) {
         double R = (double) tasks[i]->wcet_ms;

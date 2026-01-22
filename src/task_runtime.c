@@ -13,47 +13,65 @@ static TaskInstance pool[MAX_INSTANCES];
 static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int id_counter = 1;
 
+#define NSEC_PER_SEC 1000000000L
+#define MSEC_PER_NSEC 1000000LL
+
+/*
+ * Returns a new timespec representing 'ts' + 'ns'.
+ * The original 'ts' remains unmodified.
+ */
+struct timespec timespec_add_ns(struct timespec ts, long ns) {
+    // 1. Add the seconds part of the nanoseconds
+    ts.tv_sec += ns / NSEC_PER_SEC;
+
+    // 2. Add the remaining nanoseconds
+    ts.tv_nsec += ns % NSEC_PER_SEC;
+
+    // 3. Handle the carry over if tv_nsec became >= 1 billion
+    if (ts.tv_nsec >= NSEC_PER_SEC) {
+        ts.tv_nsec -= NSEC_PER_SEC;
+        ts.tv_sec++;
+    }
+
+    return ts;
+}
+
+static inline int timespec_cmp(const struct timespec *a, const struct timespec *b) {
+    if (a->tv_sec != b->tv_sec) return (a->tv_sec > b->tv_sec) ? 1 : -1;
+    if (a->tv_nsec != b->tv_nsec) return (a->tv_nsec > b->tv_nsec) ? 1 : -1;
+    return 0;
+}
+
 static long long diff_ns(const struct timespec t1, const struct timespec t2) {
-    return (long long) (t2.tv_sec - t1.tv_sec) * 1000000000LL + (t2.tv_nsec - t1.tv_nsec);
+    return (long long) (t2.tv_sec - t1.tv_sec) * NSEC_PER_SEC + (t2.tv_nsec - t1.tv_nsec);
 }
 
 static void *thread_entry(void *arg) {
     const TaskInstance *inst = (TaskInstance *) arg;
-    struct timespec next_activation, start, end;
-    const long long period_ns = inst->type->period_ms * 1000000LL;
-    const long long deadline_ns = inst->type->deadline_ms * 1000000LL;
+    struct timespec current_activation, start, end;
+    const long long deadline_ns = inst->type->deadline_ms * MSEC_PER_NSEC;
+    const long long period_ns = inst->type->period_ms * MSEC_PER_NSEC;
 
     // Anchor: Absolute time for first activation
-    clock_gettime(CLOCK_MONOTONIC, &next_activation);
 
+    clock_gettime(CLOCK_MONOTONIC, &current_activation);
     while (!inst->stop) {
+        struct timespec absolute_deadline = timespec_add_ns(current_activation, deadline_ns);
+
         clock_gettime(CLOCK_MONOTONIC, &start);
-
-        // Execute Workload
         if (inst->type->routine_fn) inst->type->routine_fn();
-
         clock_gettime(CLOCK_MONOTONIC, &end);
 
-        // Check Deadline
-        const long long exec_time = diff_ns(start, end);
-        if (exec_time > deadline_ns) {
-            printf("[Runtime] DEADLINE MISS: Task %s (ID %d) | Exec: %.2f ms > Limit: %ld ms\n",
-                   inst->type->name, inst->id,
-                   exec_time / 1000000.0, inst->type->deadline_ms);
+        if (timespec_cmp(&end, &absolute_deadline) > 0) {
+            const long long response_time = diff_ns(current_activation, end);
+            printf("[Runtime] DEADLINE MISS: Task %s (ID %d) | Resp: %.2f ms > Limit: %ld ms\n",
+                   inst->type->name, inst->id, response_time / 1000000.0, inst->type->deadline_ms);
         }
 
-        // Calculate next absolute wake-up time (t_{k+1} = t_k + T)
-        // This prevents accumulated drift.
-        next_activation.tv_nsec += period_ns;
-        while (next_activation.tv_nsec >= 1000000000LL) {
-            next_activation.tv_sec++;
-            next_activation.tv_nsec -= 1000000000LL;
-        }
+        current_activation = timespec_add_ns(current_activation, period_ns);
 
-        // Sleep until next absolute time (TIMER_ABSTIME)
-        // Handles SIGUSR1 (EINTR) for immediate shutdown.
         while (!inst->stop) {
-            const int ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_activation, NULL);
+            const int ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &current_activation, NULL);
             if (ret == 0) break;
             if (ret == EINTR) break;
         }
@@ -99,9 +117,9 @@ int runtime_create_instance(const TaskType *type) {
     pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
     pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
 
-    // RMS: Higher frequency = Higher Priority
+    // DM: Higher frequency = Higher Priority
     // Mapped to range [1, 90] to leave room for system threads
-    const int prio = 90 - (int) (type->period_ms / 100);
+    const int prio = 90 - (int) (type->deadline_ms / 100);
     param.sched_priority = (prio < 1) ? 1 : (prio > 90) ? 90 : prio;
     pthread_attr_setschedparam(&attr, &param);
 

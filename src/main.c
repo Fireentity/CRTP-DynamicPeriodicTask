@@ -8,7 +8,7 @@
 #include <signal.h>
 #include "supervisor.h"
 #include "tcp_server.h"
-#include "../include/constants.h"
+#include "constants.h"
 #include "task_runtime.h"
 #include "task_config.h"
 
